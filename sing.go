@@ -66,41 +66,92 @@ func NewReader(null bool) io.Reader {
 	return random{}
 }
 
+type Option func(*Singer) error
+
+func WithReader(r io.Reader) Option {
+	return func(s *Singer) error {
+		s.inner = r
+		return nil
+	}
+}
+
+func WithSize(z int) Option {
+	return func(s *Singer) error {
+		s.body = make([]byte, z)
+		return nil
+	}
+}
+
+func WithTimeout(d time.Duration) Option {
+	return func(s *Singer) error {
+		if d > 0 {
+			s.wait = d
+		}
+		return nil
+	}
+}
+
+func WithTTL(ttl int) Option {
+	return func(s *Singer) error {
+		c := s.conn.IPv4PacketConn()
+		if c != nil {
+			c.SetTTL(ttl)
+		}
+		return nil
+	}
+}
+
+const (
+	DefaultBodyLen   = 56
+	DefaultBufferLen = 4096
+)
+
 type Singer struct {
 	conn *icmp.PacketConn
 	next int
 	addr net.Addr
 	pid  int
 
+	wait  time.Duration
 	body  []byte
 	inner io.Reader
 
 	buffer []byte
 }
 
-func Sing(addr net.Addr, r io.Reader, size int) (*Singer, error) {
+func New(addr string, options ...Option) (*Singer, error) {
+	a, err := net.ResolveIPAddr("ip4", addr)
+	if err != nil {
+		return nil, err
+	}
 	c, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
 		return nil, err
 	}
 	s := Singer{
-		addr:   addr,
+		addr:   a,
 		conn:   c,
+		wait:   time.Second,
 		pid:    os.Getpid() & 0xFFFF,
-		buffer: make([]byte, 4096),
-		body:   make([]byte, size),
-		inner:  r,
-		next:   0,
+		buffer: make([]byte, DefaultBufferLen),
+	}
+	for _, o := range options {
+		if err := o(&s); err != nil {
+			return nil, err
+		}
+	}
+	if len(s.body) == 0 {
+		s.body = make([]byte, DefaultBodyLen)
 	}
 	return &s, nil
 }
 
-func (s *Singer) Sing(wait time.Duration) (State, error) {
+func (s *Singer) Sing() (State, error) {
 	var st State
 	if err := s.send(); err != nil {
 		return st, err
 	}
-	reply, e, err := s.recv(wait)
+	reply, e, err := s.recv()
 	if err != nil {
 		return st, err
 	}
@@ -136,18 +187,18 @@ func (s *Singer) send() error {
 	return err
 }
 
-func (s *Singer) recv(wait time.Duration) (*icmp.Message, time.Duration, error) {
+func (s *Singer) recv() (*icmp.Message, time.Duration, error) {
 	for {
 		now := time.Now()
-		if wait > 0 {
-			s.conn.SetReadDeadline(now.Add(wait))
+		if s.wait > 0 {
+			s.conn.SetReadDeadline(now.Add(s.wait))
 		}
 		n, peer, err := s.conn.ReadFrom(s.buffer)
 		if err != nil {
 			return nil, 0, err
 		}
 		if peer.String() == s.addr.String() {
-			wait = time.Since(now)
+			wait := time.Since(now)
 			reply, err := icmp.ParseMessage(IcmpId, s.buffer[:n])
 			return reply, wait, err
 		}
@@ -220,7 +271,8 @@ Options:
   -m         print info when packets lost is detected
   -n  COUNT  send COUNT echo request to given host and exit
   -s  SIZE   set body of echo request to SIZE bytes
-  -t  TIME   abort reading next reply after TIME is elapsed
+  -r  TIME   abort reading next reply after TIME is elapsed
+  -t  TTL    set TTL to future outgoing requests
   -v         print details for each request/reply
   -w  WAIT   wait WAIT seconds before sending the next request
   -z         set body of echo request to null bytes only
@@ -235,16 +287,18 @@ func main() {
 	}
 	var (
 		wait    time.Duration
-		ttl     time.Duration
+		timeout time.Duration
 		null    bool
 		size    int
+		ttl     int
 		count   int
 		missing bool
 		verbose bool
 		exit    bool
 	)
 	flag.DurationVar(&wait, "w", time.Second, "wait time")
-	flag.DurationVar(&ttl, "t", time.Second, "deadline")
+	flag.DurationVar(&timeout, "r", time.Second, "timeout")
+	flag.IntVar(&ttl, "t", 62, "time to live")
 	flag.IntVar(&size, "s", 56, "payload length")
 	flag.IntVar(&count, "n", count, "count")
 	flag.BoolVar(&null, "z", false, "zero")
@@ -253,18 +307,19 @@ func main() {
 	flag.BoolVar(&exit, "e", exit, "exit on error")
 	flag.Parse()
 
-	addr, err := net.ResolveIPAddr("ip4", flag.Arg(0))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	var print func(string, State) = printDefault
+	var print func(string, int, State) = printDefault
 	if missing {
 		print = printMissing
 	}
 
-	sng, err := Sing(addr, NewReader(null), size)
+	options := []Option{
+		WithTimeout(timeout),
+		WithTTL(ttl),
+		WithSize(size),
+		WithReader(NewReader(null)),
+	}
+
+	sng, err := New(flag.Arg(0), options...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -273,11 +328,11 @@ func main() {
 
 	s := Start()
 	repeat(count, wait, exit, func() error {
-		st, err := sng.Sing(ttl)
+		st, err := sng.Sing()
 		if err == nil {
 			s.Update(st)
 			if verbose {
-				print(flag.Arg(0), st)
+				print(flag.Arg(0), size, st)
 			}
 		}
 		return err
@@ -306,20 +361,21 @@ func repeat(count int, wait time.Duration, exit bool, fn func() error) {
 	}
 }
 
-func printDefault(addr string, st State) {
-	fmt.Fprintf(os.Stdout, "%s: seq = %d, time = %s", prolog(addr), st.Curr, st.Elapsed)
+func printDefault(addr string, size int, st State) {
+	fmt.Fprintf(os.Stdout, "%d bytes -> %s: seq = %d, time = %s", size, prolog(addr), st.Curr, st.Elapsed)
 	if diff := st.Missing(); diff > 0 {
 		fmt.Fprintf(os.Stdout, " (%d missing)", diff)
 	}
 	fmt.Fprintln(os.Stdout)
 }
 
-func printMissing(addr string, st State) {
+func printMissing(addr string, size int, st State) {
 	diff := st.Missing()
 	if diff == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s: last = %d, first = %d, missing = %d", prolog(addr), st.Prev, st.Curr, diff)
+	n := size * diff
+	fmt.Fprintf(os.Stdout, "%s: last = %d, first = %d, missing = %d (% bytes lost)", prolog(addr), st.Prev, st.Curr, diff, n)
 	fmt.Fprintln(os.Stdout)
 }
 
