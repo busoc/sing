@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -175,7 +176,7 @@ type Session struct {
 	total int
 	min   time.Duration
 	max   time.Duration
-  avg   time.Duration
+	avg   time.Duration
 	now   time.Time
 }
 
@@ -194,7 +195,7 @@ func (s *Session) Update(st State) {
 	if s.max == 0 || st.Elapsed > s.max {
 		s.max = st.Elapsed
 	}
-  s.avg += st.Elapsed
+	s.avg += st.Elapsed
 }
 
 func (s *Session) Dump() {
@@ -210,7 +211,28 @@ func (s *Session) Dump() {
 	fmt.Printf("total  : %s\n", time.Since(s.now))
 }
 
+const help = `sing send ICMP echo request to network hosts
+
+Options:
+
+  -e         exit when an error is encountered
+  -h         print this help message and exit
+  -m         print info when packets lost is detected
+  -n  COUNT  send COUNT echo request to given host and exit
+  -s  SIZE   set body of echo request to SIZE bytes
+  -t  TIME   abort reading next reply after TIME is elapsed
+  -v         print details for each request/reply
+  -w  WAIT   wait WAIT seconds before sending the next request
+  -z         set body of echo request to null bytes only
+
+Usage: sing [option] <ip|host>
+`
+
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stdout, strings.TrimSpace(help))
+		os.Exit(1)
+	}
 	var (
 		wait    time.Duration
 		ttl     time.Duration
@@ -302,8 +324,8 @@ func printMissing(addr string, st State) {
 }
 
 func prolog(addr string) string {
-  if ns, _ := net.LookupHost(addr); len(ns) > 0 {
-    return fmt.Sprintf("%s (%s)", addr, ns[len(ns)-1])
-  }
-  return addr
+	if ns, _ := net.LookupHost(addr); len(ns) > 0 {
+		return fmt.Sprintf("%s (%s)", addr, ns[len(ns)-1])
+	}
+	return addr
 }
