@@ -250,13 +250,18 @@ func (s *Session) Update(st State) {
 }
 
 func (s *Session) Dump() {
-	var percent float64
+	var (
+		percent float64
+		avg time.Duration
+	)
 	if s.total > 0 {
 		percent = float64(s.lost) / float64(s.total)
+		avg = s.avg/time.Duration(s.total)
 	}
+
 	fmt.Printf("packets: %d\n", s.total)
 	fmt.Printf("lost   : %d (%.2f%%)\n", s.lost, percent)
-	fmt.Printf("avg    : %s\n", s.avg/time.Duration(s.total))
+	fmt.Printf("avg    : %s\n", avg)
 	fmt.Printf("min    : %s\n", s.min)
 	fmt.Printf("max    : %s\n", s.max)
 	fmt.Printf("total  : %s\n", time.Since(s.now))
